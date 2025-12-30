@@ -13,6 +13,10 @@ def resize_frame(frame, size, opacity=1.0, greyscale=False):
     # Store original info
     original_info = frame.info.copy() if hasattr(frame, 'info') else {}
     
+    # Convert to RGBA to ensure transparency is preserved
+    if frame.mode != 'RGBA':
+        frame = frame.convert('RGBA')
+    
     # Calculate new size maintaining aspect ratio
     original_width, original_height = frame.size
     if original_width > original_height:
@@ -546,10 +550,13 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
 
                 # Handle different output formats properly
                 if output_format.upper() == 'GIF':
-                    # Convert to RGBA to prevent palette issues
+                    # Convert to RGBA first, then to palette mode with transparency
                     if img.mode != 'RGBA':
                         img = img.convert('RGBA')
-                    img.save(output_path, format='GIF')
+                    
+                    # Convert to palette mode preserving transparency
+                    img_p = img.convert('P', palette=Image.ADAPTIVE, colors=255)
+                    img_p.save(output_path, format='GIF', transparency=255)
                     
                 elif output_format.upper() in ['JPEG', 'JPG']:
                     # Convert RGBA to RGB for JPEG
