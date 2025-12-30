@@ -549,13 +549,72 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
                 img = resize_frame(img, size, opacity, greyscale)
 
                 # Handle different output formats properly
+
                 if output_format.upper() == 'GIF':
-                    # Convert to RGBA first, then to palette mode with transparency
+                    # Convert to RGBA first
                     if img.mode != 'RGBA':
                         img = img.convert('RGBA')
                     
-                    # Convert to palette mode preserving transparency
+                    # Flood fill white background from corners with transparency
+                    from PIL import ImageDraw
+                    
+                    # Get image data as pixels
+                    pixels = img.load()
+                    width, height = img.size
+                    
+                    # Define white (with tolerance)
+                    def is_white(pixel, tolerance=30):
+                        if len(pixel) >= 3:
+                            return all(c >= 255 - tolerance for c in pixel[:3])
+                        return False
+                    
+                    # Flood fill from corners using a queue-based approach
+                    from collections import deque
+                    visited = set()
+                    to_make_transparent = set()
+                    
+                    # Start from all four corners
+                    corners = [(0, 0), (width-1, 0), (0, height-1), (width-1, height-1)]
+                    queue = deque()
+                    
+                    for corner in corners:
+                        if is_white(pixels[corner]):
+                            queue.append(corner)
+                            visited.add(corner)
+                    
+                    # Flood fill
+                    while queue:
+                        x, y = queue.popleft()
+                        to_make_transparent.add((x, y))
+                        
+                        # Check neighbors (4-connected)
+                        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < width and 0 <= ny < height:
+                                if (nx, ny) not in visited:
+                                    visited.add((nx, ny))
+                                    if is_white(pixels[nx, ny]):
+                                        queue.append((nx, ny))
+                    
+                    # Make background pixels transparent
+                    for x, y in to_make_transparent:
+                        r, g, b, a = pixels[x, y]
+                        pixels[x, y] = (r, g, b, 0)
+                    
+                    # Now convert to palette mode with transparency
+                    # Get the alpha channel
+                    alpha = img.split()[3]
+                    
+                    # Convert to palette mode
                     img_p = img.convert('P', palette=Image.ADAPTIVE, colors=255)
+                    
+                    # Create a mask where alpha == 0 (transparent pixels)
+                    mask = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
+                    
+                    # Paste transparency index (255) where pixels are transparent
+                    img_p.paste(255, mask)
+                    
+                    # Save with transparency
                     img_p.save(output_path, format='GIF', transparency=255)
                     
                 elif output_format.upper() in ['JPEG', 'JPG']:
