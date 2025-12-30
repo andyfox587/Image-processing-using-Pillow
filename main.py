@@ -13,6 +13,10 @@ def resize_frame(frame, size, opacity=1.0, greyscale=False):
     # Store original info
     original_info = frame.info.copy() if hasattr(frame, 'info') else {}
     
+    # Convert to RGBA to ensure transparency is preserved
+    if frame.mode != 'RGBA':
+        frame = frame.convert('RGBA')
+    
     # Calculate new size maintaining aspect ratio
     original_width, original_height = frame.size
     if original_width > original_height:
