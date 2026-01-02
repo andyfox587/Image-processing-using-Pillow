@@ -402,12 +402,22 @@ def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
         durations = [info.get('duration', 100) for info in test_info]
         disposals = [info.get('disposal', 0) for info in test_info]
         
-       # Convert frames to palette mode without dithering to reduce noise
+        # Convert frames to palette mode without dithering, preserving transparency
         p_frames = []
         for frame in final_frames:
             if frame.mode == 'RGBA':
+                # Get alpha channel before conversion
+                alpha = frame.split()[3]
+                
+                # Convert to palette without dithering
                 frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
-                frame_p.info['transparency'] = 255
+                
+                # Create mask where alpha == 0 (transparent pixels)
+                mask = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
+                
+                # Paste transparency index where pixels are transparent
+                frame_p.paste(255, mask)
+                
                 p_frames.append(frame_p)
             else:
                 p_frames.append(frame)
