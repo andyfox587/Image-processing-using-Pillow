@@ -387,7 +387,7 @@ def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
                         result = subprocess.run([
                             'gifsicle',
                             '--optimize=3',
-                            '--careful'.
+                            '--careful',
                             f'--lossy={lossy}',
                             '--colors=256',
                             temp_reduced,
