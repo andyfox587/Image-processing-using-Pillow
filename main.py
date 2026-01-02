@@ -402,13 +402,24 @@ def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
         durations = [info.get('duration', 100) for info in test_info]
         disposals = [info.get('disposal', 0) for info in test_info]
         
-        final_frames[0].save(
+       # Convert frames to palette mode without dithering to reduce noise
+        p_frames = []
+        for frame in final_frames:
+            if frame.mode == 'RGBA':
+                frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
+                frame_p.info['transparency'] = 255
+                p_frames.append(frame_p)
+            else:
+                p_frames.append(frame)
+        
+        p_frames[0].save(
             temp_path,
             save_all=True,
-            append_images=final_frames[1:],
+            append_images=p_frames[1:],
             duration=durations,
-            disposal=disposals,
-            loop=0
+            disposal=2,
+            loop=0,
+            transparency=255
         )
         
         test_size_kb = os.path.getsize(temp_path) / 1024
