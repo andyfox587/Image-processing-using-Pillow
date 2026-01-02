@@ -147,96 +147,102 @@ def process_animated_gif(img, output_path, size, max_size_kb):
     save_gif_optimized(frames, frame_info, output_path, max_size_kb)
 
 def save_gif_optimized(frames, frame_info, output_path, max_size_kb):
-    """Save GIF preserving all original frame metadata and colors"""
-    # Extract durations and disposal methods from original frames
+    """Save GIF and optimize with gifsicle for better quality compression"""
+    import subprocess
+    import shutil
+    
+    # Extract durations from original frames
     durations = [info.get('duration', 100) for info in frame_info]
-    disposals = [info.get('disposal', 0) for info in frame_info]
     
-    print(f"Saving {len(frames)} frames. First frame mode: {frames[0].mode}")
-    print(f"Frame modes: {[f.mode for f in frames[:5]]}")
+    print(f"Saving {len(frames)} frames with gifsicle optimization")
     
-    # EZGIF APPROACH: Progressive lossy compression (no palette manipulation)
-    print(f"Using EZGIF-style progressive lossy compression")
-    
-    # Convert all RGBA frames to RGB (GIF doesn't support alpha)
-    rgb_frames = []
+    # Convert frames to palette mode with transparency
+    p_frames = []
     for frame in frames:
         if frame.mode == 'RGBA':
-            # Create white background and paste frame with alpha
-            rgb_frame = Image.new('RGB', frame.size, (255, 255, 255))
-            rgb_frame.paste(frame, mask=frame.split()[3] if len(frame.split()) == 4 else None)
-            rgb_frames.append(rgb_frame)
-        elif frame.mode == 'RGB':
-            rgb_frames.append(frame)
+            # Get alpha channel before conversion
+            alpha = frame.split()[3]
+            
+            # Convert to palette without dithering
+            frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
+            
+            # Create mask where alpha == 0 (transparent pixels)
+            mask = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
+            
+            # Paste transparency index where pixels are transparent
+            frame_p.paste(255, mask)
+            
+            p_frames.append(frame_p)
+        elif frame.mode == 'P':
+            p_frames.append(frame)
         else:
-            # Convert any other mode to RGB
-            rgb_frames.append(frame.convert('RGB'))
+            frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
+            p_frames.append(frame_p)
     
-    print(f"Converted {len(rgb_frames)} frames to RGB mode")
+    # Save initial GIF
+    temp_unoptimized = output_path.replace('.gif', '_temp_unopt.gif')
     
-    # EZGIF Method: Try progressive lossy compression levels
-    import tempfile
-    import os
+    p_frames[0].save(
+        temp_unoptimized,
+        save_all=True,
+        append_images=p_frames[1:],
+        duration=durations,
+        disposal=2,
+        loop=0,
+        transparency=255
+    )
     
-    # Progressive compression levels to try (like EZGIF: 35%, 45%, 55%, etc.)
-    compression_levels = [35, 45, 55, 65, 75, 85, 95]
+    # Check if gifsicle is available
+    gifsicle_path = shutil.which('gifsicle')
     
-    for compression_level in compression_levels:
-        print(f"Trying lossy compression at {compression_level}%...")
+    if gifsicle_path:
+        # Try progressively more aggressive lossy compression
+        lossy_levels = [30, 60, 80, 100, 120, 150, 200]
         
-        try:
-            # Create temporary file to test compression
-            with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            # Save with basic settings (like EZGIF does)
-            rgb_frames[0].save(
-                temp_path,
-                save_all=True,
-                append_images=rgb_frames[1:],
-                duration=durations,
-                disposal=disposals,
-                loop=0,
-                # Apply lossy compression by reducing color count based on compression level
-                # Higher compression = fewer colors (but not palette manipulation)
-                colors=max(32, int(256 * (100 - compression_level) / 100))  # Scale colors based on compression
-            )
-            
-            # Check file size
-            file_size_kb = os.path.getsize(temp_path) / 1024
-            print(f"  Result: {file_size_kb:.1f}KB with {compression_level}% compression")
-            
-            if file_size_kb <= max_size_kb:
-                print(f"✓ SUCCESS! Achieved {file_size_kb:.1f}KB with {compression_level}% lossy compression")
-                # Move temp file to final location
-                os.rename(temp_path, output_path)
-                return
-            else:
-                print(f"  Still too large ({file_size_kb:.1f}KB > {max_size_kb}KB)")
-                os.unlink(temp_path)  # Clean up temp file
+        for lossy in lossy_levels:
+            try:
+                # Run gifsicle with lossy compression
+                result = subprocess.run([
+                    'gifsicle',
+                    '--optimize=3',
+                    f'--lossy={lossy}',
+                    '--colors=256',
+                    temp_unoptimized,
+                    '-o', output_path
+                ], capture_output=True, text=True)
                 
-        except Exception as e:
-            print(f"  Error with {compression_level}% compression: {e}")
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            continue
+                if result.returncode == 0 and os.path.exists(output_path):
+                    file_size_kb = os.path.getsize(output_path) / 1024
+                    print(f"  gifsicle lossy={lossy}: {file_size_kb:.1f}KB")
+                    
+                    if file_size_kb <= max_size_kb:
+                        print(f"✓ SUCCESS with gifsicle lossy={lossy}: {file_size_kb:.1f}KB")
+                        # Clean up temp file
+                        if os.path.exists(temp_unoptimized):
+                            os.remove(temp_unoptimized)
+                        return
+                else:
+                    print(f"  gifsicle error: {result.stderr}")
+                    
+            except Exception as e:
+                print(f"  gifsicle exception: {e}")
+        
+        # If all lossy levels failed to meet target, use the last result
+        if os.path.exists(output_path):
+            file_size_kb = os.path.getsize(output_path) / 1024
+            print(f"⚠ Best gifsicle result: {file_size_kb:.1f}KB (target was {max_size_kb}KB)")
+        else:
+            # Fallback to unoptimized
+            shutil.copy(temp_unoptimized, output_path)
+            print(f"⚠ Falling back to unoptimized GIF")
+    else:
+        # No gifsicle, just use the unoptimized version
+        shutil.copy(temp_unoptimized, output_path)
+        print(f"⚠ gifsicle not available, using Pillow output")
     
-    # If all compression levels failed, fall back to frame reduction (EZGIF's last resort)
-    print(f"All compression levels failed, falling back to frame reduction...")
-    
-    # Basic save as last resort
-    try:
-        rgb_frames[0].save(
-            output_path,
-            save_all=True,
-            append_images=rgb_frames[1:],
-            duration=durations,
-            disposal=disposals,
-            loop=0
-        )
-        print(f"Fallback save completed")
-    except Exception as e:
-        print(f"All save methods failed: {e}")
+    # Clean up temp file
+    if os.path.exists(temp_unoptimized):
+        os.remove(temp_unoptimized)
 
 def analyze_frame_differences(frames):
     """Analyze differences between consecutive frames using efficient histogram comparison"""
@@ -262,236 +268,159 @@ def analyze_frame_differences(frames):
     return differences
 
 def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
-    """Create a compressed version under target size using iterative approach"""
+    """Create a compressed GIF using gifsicle for better quality"""
+    import subprocess
+    import shutil
+    
     print(f"Creating compressed version targeting {target_size_kb}KB...")
-    print(f"Input: {len(frames)} frames to compress")
+    print(f"Input: {len(frames)} frames")
     
-    # Special handling for very small targets (280x280) - be much more conservative
-    is_very_small = target_size_kb <= 290
+    # Convert frames to palette mode with transparency
+    p_frames = []
+    for frame in frames:
+        if frame.mode == 'RGBA':
+            # Get alpha channel before conversion
+            alpha = frame.split()[3]
+            
+            # Convert to palette without dithering
+            frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
+            
+            # Create mask where alpha == 0 (transparent pixels)
+            mask = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
+            
+            # Paste transparency index where pixels are transparent
+            frame_p.paste(255, mask)
+            
+            p_frames.append(frame_p)
+        elif frame.mode == 'P':
+            p_frames.append(frame)
+        else:
+            frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
+            p_frames.append(frame_p)
     
-    # Analyze frame differences
-    differences = analyze_frame_differences(frames)
-    print(f"Frame differences calculated: min={min(differences):.4f}, max={max(differences):.4f}, avg={sum(differences)/len(differences):.4f}")
+    # Get durations
+    durations = [info.get('duration', 100) for info in frame_info]
     
-    # Create list of (index, difference) pairs, skip first frame
-    indexed_diffs = [(i+1, diff) for i, diff in enumerate(differences)]
-    
-    # Sort by difference (smallest first) - these are candidates for removal
-    indexed_diffs.sort(key=lambda x: x[1])
-    
-    # Try progressively more aggressive compression until we hit target
-    import os
+    # Save initial GIF with all frames
     temp_path = output_path.replace('.gif', '_temp.gif')
     
-    # Try different frame counts - ONLY reduce frames, never colors
-    # Ensure minimum frames to maintain animation quality
-    if is_very_small:
-        min_frames = max(6, len(frames) // 10)  # For 280x280: Much more aggressive - minimum 6 frames
+    p_frames[0].save(
+        temp_path,
+        save_all=True,
+        append_images=p_frames[1:],
+        duration=durations,
+        disposal=2,
+        loop=0,
+        transparency=255
+    )
+    
+    # Check if gifsicle is available
+    gifsicle_path = shutil.which('gifsicle')
+    
+    if gifsicle_path:
+        # Try progressively more aggressive lossy compression
+        lossy_levels = [30, 60, 80, 100, 120, 150, 200]
+        
+        for lossy in lossy_levels:
+            try:
+                result = subprocess.run([
+                    'gifsicle',
+                    '--optimize=3',
+                    f'--lossy={lossy}',
+                    '--colors=256',
+                    temp_path,
+                    '-o', output_path
+                ], capture_output=True, text=True)
+                
+                if result.returncode == 0 and os.path.exists(output_path):
+                    file_size_kb = os.path.getsize(output_path) / 1024
+                    print(f"  gifsicle lossy={lossy}: {file_size_kb:.1f}KB")
+                    
+                    if file_size_kb <= target_size_kb:
+                        print(f"✓ SUCCESS with gifsicle lossy={lossy}: {file_size_kb:.1f}KB")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        return
+                        
+            except Exception as e:
+                print(f"  gifsicle exception: {e}")
+        
+        # If lossy compression alone isn't enough, try frame reduction + lossy
+        if os.path.exists(output_path):
+            file_size_kb = os.path.getsize(output_path) / 1024
+            if file_size_kb > target_size_kb:
+                print(f"  Lossy compression not enough, trying frame reduction...")
+                
+                # Try reducing frames
+                frame_counts = [len(frames) // 2, len(frames) // 3, len(frames) // 4]
+                
+                for target_frames in frame_counts:
+                    if target_frames < 6:
+                        target_frames = 6
+                    
+                    # Evenly space frames
+                    step = len(p_frames) / target_frames
+                    reduced_indices = [int(i * step) for i in range(target_frames)]
+                    reduced_frames = [p_frames[i] for i in reduced_indices]
+                    
+                    # Adjust timing
+                    original_duration = durations[0] if durations else 100
+                    new_duration = int(original_duration * len(frames) / target_frames)
+                    new_duration = min(new_duration, 150)  # Cap at 150ms
+                    
+                    # Save reduced version
+                    temp_reduced = output_path.replace('.gif', '_temp_reduced.gif')
+                    reduced_frames[0].save(
+                        temp_reduced,
+                        save_all=True,
+                        append_images=reduced_frames[1:],
+                        duration=new_duration,
+                        disposal=2,
+                        loop=0,
+                        transparency=255
+                    )
+                    
+                    # Apply gifsicle
+                    for lossy in [80, 120, 200]:
+                        result = subprocess.run([
+                            'gifsicle',
+                            '--optimize=3',
+                            f'--lossy={lossy}',
+                            '--colors=256',
+                            temp_reduced,
+                            '-o', output_path
+                        ], capture_output=True, text=True)
+                        
+                        if result.returncode == 0 and os.path.exists(output_path):
+                            file_size_kb = os.path.getsize(output_path) / 1024
+                            print(f"  {target_frames} frames + lossy={lossy}: {file_size_kb:.1f}KB")
+                            
+                            if file_size_kb <= target_size_kb:
+                                print(f"✓ SUCCESS with {target_frames} frames + lossy={lossy}")
+                                if os.path.exists(temp_reduced):
+                                    os.remove(temp_reduced)
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                                return
+                    
+                    if os.path.exists(temp_reduced):
+                        os.remove(temp_reduced)
+        
+        # Use best result we got
+        if os.path.exists(output_path):
+            file_size_kb = os.path.getsize(output_path) / 1024
+            print(f"⚠ Best result: {file_size_kb:.1f}KB (target was {target_size_kb}KB)")
+        else:
+            shutil.copy(temp_path, output_path)
+            
     else:
-        min_frames = max(8, len(frames) // 6)  # For larger sizes: Still aggressive
-        
-    print(f"Minimum frames enforced: {min_frames} (very_small={is_very_small})")
+        # No gifsicle - fall back to just the Pillow version
+        shutil.copy(temp_path, output_path)
+        print(f"⚠ gifsicle not available")
     
-    # Frame reduction attempts - NO COLOR REDUCTION
-    if target_size_kb <= 290:  # For 360x360 and 280x280
-        if is_very_small:  # 280x280 - be more aggressive to hit size target
-            frame_attempts = [
-                min(20, len(frames)),   # Start with 20 frames max
-                min(15, len(frames)),   # 15 frames
-                min(12, len(frames)),   # 12 frames
-                min(10, len(frames)),   # 10 frames
-                max(min_frames, 8),     # 8+ frames
-                min_frames,             # minimum frames
-            ]
-        else:  # 360x360
-            frame_attempts = [
-                min(25, len(frames)),   # 25 frames
-                min(20, len(frames)),   # 20 frames
-                min(15, len(frames)),   # 15 frames
-                max(min_frames, 12),    # 12+ frames
-                min_frames,             # minimum frames
-            ]
-    else:  # For 720x720
-        frame_attempts = [
-            30,  # 30 frames
-            25,  # 25 frames
-            20,  # 20 frames
-            15,  # 15 frames
-            12,  # 12 frames
-            10,  # 10 frames
-        ]
-    
-    for target_frame_count in frame_attempts:
-        print(f"\nTrying {target_frame_count} frames with original colors preserved...")
-        print(f"  Original frames: {len(frames)}, Min frames enforced: {min_frames}")
-        
-        # Simple but effective frame selection: evenly spaced frames
-        actual_target = max(target_frame_count, min_frames, 6)  # Never below 6 frames
-        
-        if actual_target >= len(frames):
-            # Keep all frames if target is higher than available
-            frames_to_keep = list(range(len(frames)))
-        else:
-            # Evenly distribute frames across the animation
-            step = len(frames) / actual_target
-            frames_to_keep = []
-            
-            # Always include first frame
-            frames_to_keep.append(0)
-            
-            # Add evenly spaced frames
-            for i in range(1, actual_target - 1):
-                frame_idx = int(round(i * step))
-                if frame_idx < len(frames) and frame_idx not in frames_to_keep:
-                    frames_to_keep.append(frame_idx)
-            
-            # Always include last frame for proper loop
-            if len(frames) - 1 not in frames_to_keep:
-                frames_to_keep.append(len(frames) - 1)
-                
-            # Sort and ensure we don't exceed target
-            frames_to_keep.sort()
-            frames_to_keep = frames_to_keep[:actual_target]
-        
-        print(f"  Keeping {len(frames_to_keep)} frames: {frames_to_keep[:10]}{'...' if len(frames_to_keep) > 10 else ''}")
-        
-        # Create reduced frame set
-        test_frames = [frames[i] for i in frames_to_keep]
-        test_info = [frame_info[i] for i in frames_to_keep]
-        
-        # Calculate timing to maintain same animation speed
-        original_frame_count = len(frame_info)
-        new_frame_count = len(test_frames)
-        # Always use the TRUE original duration from source frames, not modified ones
-        original_duration = 30  # The original GIF has 30ms frames
-        
-        # Debug the calculation
-        print(f"  DEBUG: original_frame_count = {original_frame_count}")
-        print(f"  DEBUG: new_frame_count = {new_frame_count}")
-        print(f"  DEBUG: original_duration = {original_duration}ms")
-        
-        # Simple calculation: if we have fewer frames, increase duration proportionally
-        duration_multiplier = original_frame_count / new_frame_count
-        new_duration = int(original_duration * duration_multiplier)
-        
-        print(f"  DEBUG: duration_multiplier = {duration_multiplier:.2f}")
-        print(f"  DEBUG: calculated new_duration = {new_duration}ms")
-        
-        # Sanity check - keep reasonable timing (revert to 150ms cap that worked well)
-        if new_duration > 500:  # More than half a second is too slow
-            print(f"  WARNING: Calculated duration {new_duration}ms too slow, using 150ms")
-            new_duration = 150
-        
-        print(f"  Final: {original_frame_count} frames → {new_frame_count} frames")
-        print(f"  Timing: {original_duration}ms → {new_duration}ms per frame")
-        
-        # Update durations
-        for info in test_info:
-            info['duration'] = new_duration
-        
-        # Use frames as-is with NO color compression to preserve quality
-        final_frames = test_frames
-        
-        # Debug frame information
-        print(f"  Final frames modes: {[f.mode for f in final_frames[:3]]}")
-        
-        # All frames should now be in RGBA mode
-        print(f"  All frames in RGBA mode - preserving full color information")
-        
-        # Save and test file size
-        durations = [info.get('duration', 100) for info in test_info]
-        disposals = [info.get('disposal', 0) for info in test_info]
-        
-        # Convert frames to palette mode without dithering, preserving transparency
-        p_frames = []
-        for frame in final_frames:
-            if frame.mode == 'RGBA':
-                # Get alpha channel before conversion
-                alpha = frame.split()[3]
-                
-                # Convert to palette without dithering
-                frame_p = frame.convert('P', palette=Image.ADAPTIVE, colors=255, dither=Image.Dither.NONE)
-                
-                # Create mask where alpha == 0 (transparent pixels)
-                mask = Image.eval(alpha, lambda a: 255 if a == 0 else 0)
-                
-                # Paste transparency index where pixels are transparent
-                frame_p.paste(255, mask)
-                
-                p_frames.append(frame_p)
-            else:
-                p_frames.append(frame)
-        
-        p_frames[0].save(
-            temp_path,
-            save_all=True,
-            append_images=p_frames[1:],
-            duration=durations,
-            disposal=2,
-            loop=0,
-            transparency=255
-        )
-        
-        test_size_kb = os.path.getsize(temp_path) / 1024
-        print(f"  Result: {test_size_kb:.1f}KB")
-        
-        if test_size_kb <= target_size_kb:
-            print(f"✓ SUCCESS! Achieved {test_size_kb:.1f}KB with {len(final_frames)} frames, original colors preserved")
-            os.rename(temp_path, output_path)
-            return
-        else:
-            print(f"  Still too large ({test_size_kb:.1f}KB > {target_size_kb}KB)")
-    
-    # If we get here, try one last fallback - create a higher quality version even if slightly over target
-    print(f"⚠ Unable to reach target {target_size_kb}KB, trying fallback...")
-    
-    # Fallback: Use more frames with no color compression
-    fallback_frames = max(min_frames, len(frames) // 3)
-    fallback_attempts = [fallback_frames, max(min_frames, fallback_frames // 2)]
-    
-    for target_frame_count in fallback_attempts:
-        print(f"\nFallback attempt: {target_frame_count} frames with original colors")
-        
-        # Use evenly spaced frames
-        step = max(1, len(frames) // target_frame_count)
-        frames_to_keep = list(range(0, len(frames), step))[:target_frame_count]
-        
-        test_frames = [frames[i] for i in frames_to_keep]
-        test_info = [frame_info[i] for i in frames_to_keep]
-        
-        # Update durations
-        new_duration = 100  # Standard duration
-        for info in test_info:
-            info['duration'] = new_duration
-            
-        # All frames should now be in RGBA mode, so no palette handling needed
-        
-        durations = [info.get('duration', 100) for info in test_info]
-        disposals = [info.get('disposal', 0) for info in test_info]
-        
-        test_frames[0].save(
-            temp_path,
-            save_all=True,
-            append_images=test_frames[1:],
-            duration=durations,
-            disposal=disposals,
-            loop=0
-        )
-        
-        test_size_kb = os.path.getsize(temp_path) / 1024
-        print(f"  Fallback result: {test_size_kb:.1f}KB with {len(test_frames)} frames")
-        
-        # Accept fallback even if slightly over target (within 50KB tolerance for small targets)
-        tolerance = 50 if target_size_kb <= 290 else 100
-        if test_size_kb <= target_size_kb + tolerance:
-            print(f"✓ FALLBACK SUCCESS! Using {test_size_kb:.1f}KB version with {len(test_frames)} frames")
-            os.rename(temp_path, output_path)
-            return
-    
-    # Clean up temp file
+    # Clean up
     if os.path.exists(temp_path):
         os.remove(temp_path)
-    print(f"⚠ Unable to create acceptable version under {target_size_kb + tolerance}KB")
 
 def convert_image(input_path, output_dir, size, output_format, max_size_kb, 
                  suffix='', opacity=1.0, greyscale=False, stamps_mode=False):
