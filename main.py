@@ -205,6 +205,7 @@ def save_gif_optimized(frames, frame_info, output_path, max_size_kb):
                 result = subprocess.run([
                     'gifsicle',
                     '--optimize=3',
+                    '--careful',
                     f'--lossy={lossy}',
                     '--colors=256',
                     temp_unoptimized,
