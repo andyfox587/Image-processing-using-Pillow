@@ -1,0 +1,326 @@
+2
+import os
+import io
+from PIL import Image, ImageSequence, ImageOps
+
+def resize_frame(frame, size, opacity=1.0, greyscale=False):
+    """Resize and optionally convert to greyscale a single frame"""
+    # Use LANCZOS for better quality when downsizing, fallback to ANTIALIAS
+    try:
+        resampling = Image.LANCZOS
+    except AttributeError:
+        resampling = Image.ANTIALIAS
+    
+    # Convert to RGBA first to ensure proper alpha handling
+    if frame.mode != 'RGBA':
+        frame = frame.convert('RGBA')
+    
+    frame = frame.resize((size, size), resampling)
+    if greyscale:
+        # Convert to greyscale while preserving alpha channel
+        alpha = frame.split()[3]
+        grey = ImageOps.grayscale(frame.convert('RGB'))
+        frame = grey.convert('RGBA')
+        frame.putalpha(alpha)
+    if opacity < 1.0:
+        alpha = frame.split()[3]
+        alpha = alpha.point(lambda p: int(p * opacity))
+        frame.putalpha(alpha)
+    return frame
+
+def optimize_image_size(img, max_size_kb, format='PNG'):
+    """Optimize image to meet size requirements"""
+    buffer = io.BytesIO()
+    
+    if format.upper() in ['JPEG', 'JPG']:
+        quality = 95
+        while quality > 5:
+            buffer.seek(0)
+            buffer.truncate()
+            img.save(buffer, format=format, optimize=True, quality=quality)
+            if buffer.tell() / 1024 <= max_size_kb:
+                break
+            quality -= 5
+    else:
+        # For PNG and other formats, try different compression levels
+        compress_level = 6
+        while compress_level <= 9:
+            buffer.seek(0)
+            buffer.truncate()
+            save_kwargs = {'format': format, 'optimize': True}
+            if format.upper() == 'PNG':
+                save_kwargs['compress_level'] = compress_level
+            img.save(buffer, **save_kwargs)
+            if buffer.tell() / 1024 <= max_size_kb:
+                break
+            compress_level += 1
+        
+        # If still too large, try reducing colors for PNG
+        if buffer.tell() / 1024 > max_size_kb and format.upper() == 'PNG':
+            if img.mode == 'RGBA':
+                # Convert to palette mode with transparency
+                alpha = img.split()[3]
+                img_rgb = img.convert('RGB')
+                img_p = img_rgb.quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+                mask = Image.eval(alpha, lambda a: 255 if a <= 128 else 0)
+                img_p.paste(255, mask=mask)
+                img_p.info['transparency'] = 255
+                buffer.seek(0)
+                buffer.truncate()
+                img_p.save(buffer, format='PNG', optimize=True, transparency=255)
+
+    return buffer.getvalue() if buffer.tell() > 0 else None
+
+def process_animated_gif(img, output_path, size, max_size_kb):
+    """Process animated GIF while maintaining size constraints and transparency"""
+    frames = []
+    durations = []
+
+    for frame in ImageSequence.Iterator(img):
+        duration = frame.info.get('duration', 100)
+        frame = resize_frame(frame, size)
+        
+        # Convert to palette mode with proper transparency handling
+        alpha = frame.split()[3] if frame.mode == 'RGBA' else None
+        frame_rgb = frame.convert('RGB')
+        
+        # Use adaptive palette with transparency
+        frame_p = frame_rgb.quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+        
+        if alpha:
+            # Create transparency mask - pixels with low alpha become transparent (index 255)
+            # Pixels with high alpha remain opaque (use existing palette index)
+            mask = Image.eval(alpha, lambda a: 255 if a < 128 else 0)
+            frame_p.paste(255, mask=mask)
+            frame_p.info['transparency'] = 255
+        
+        frames.append(frame_p)
+        durations.append(duration)
+
+    # Try saving with high quality first
+    save_gif_optimized(frames, durations, output_path, max_size_kb)
+
+def save_gif_optimized(frames, durations, output_path, max_size_kb):
+    """Save GIF with transparency and size optimization"""
+    # First attempt: High quality with transparency
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        format='GIF',
+        optimize=True,
+        duration=durations,
+        loop=0,
+        transparency=255,
+        disposal=2  # Restore to background (transparent)
+    )
+    
+    # Check file size
+    file_size_kb = os.path.getsize(output_path) / 1024
+    
+    if file_size_kb > max_size_kb:
+        # Reduce colors if too large
+        reduced_frames = []
+        for frame in frames:
+            reduced_frame = frame.quantize(colors=128, method=Image.Quantize.FASTOCTREE)
+            if 'transparency' in frame.info:
+                reduced_frame.info['transparency'] = 255
+            reduced_frames.append(reduced_frame)
+        
+        # Save with reduced colors
+        reduced_frames[0].save(
+            output_path,
+            save_all=True,
+            append_images=reduced_frames[1:],
+            format='GIF',
+            optimize=True,
+            duration=durations,
+            loop=0,
+            transparency=255,
+            disposal=2
+        )
+
+def convert_image(input_path, output_dir, size, output_format, max_size_kb, 
+                 suffix='', opacity=1.0, greyscale=False):
+    """Convert a single image with size and format constraints"""
+    try:
+        with Image.open(input_path) as img:
+            is_animated = getattr(img, "is_animated", False)
+            # Debug output to track animation detection
+            if input_path.lower().endswith('.gif'):
+                print(f"DEBUG: Processing {os.path.basename(input_path)}, is_animated: {is_animated}, output_format: {output_format}")
+            
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+            new_filename = f"{base_name}_{size}x{size}{suffix}.{output_format.lower()}"
+            output_path = os.path.join(output_dir, new_filename)
+
+            if output_format.lower() == 'gif' and is_animated:
+                print(f"DEBUG: Processing animated GIF: {os.path.basename(input_path)}")
+                process_animated_gif(img, output_path, size, max_size_kb)
+            else:
+                img = resize_frame(img, size, opacity, greyscale)
+
+                # Handle different output formats properly
+                if output_format.upper() == 'GIF':
+                    # Convert static image to GIF with transparency
+                    alpha = img.split()[3] if img.mode == 'RGBA' else None
+                    img_rgb = img.convert('RGB')
+                    img_p = img_rgb.quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+                    
+                    if alpha:
+                        # Create transparency mask - pixels with low alpha become transparent (index 255)
+                        # Pixels with high alpha remain opaque (use existing palette index)
+                        mask = Image.eval(alpha, lambda a: 255 if a < 128 else 0)
+                        img_p.paste(255, mask=mask)
+                        img_p.info['transparency'] = 255
+                    
+                    img_p.save(output_path, format='GIF', optimize=True, transparency=255)
+                    
+                elif output_format.upper() in ['JPEG', 'JPG']:
+                    # Convert RGBA to RGB for JPEG
+                    if img.mode == 'RGBA':
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        background.paste(img, mask=img.split()[3] if len(img.split()) == 4 else None)
+                        img = background
+                    image_data = optimize_image_size(img, max_size_kb, output_format)
+                    if image_data:
+                        with open(output_path, 'wb') as f:
+                            f.write(image_data)
+                    else:
+                        img.save(output_path, format=output_format, optimize=True)
+                else:
+                    # For PNG and other formats that support transparency
+                    image_data = optimize_image_size(img, max_size_kb, output_format)
+                    if image_data:
+                        with open(output_path, 'wb') as f:
+                            f.write(image_data)
+                    else:
+                        img.save(output_path, format=output_format, optimize=True)
+
+            print(f"Created: {output_path}")
+    except Exception as e:
+        print(f"Error processing {input_path}: {str(e)}")
+
+def process_images(input_folder, mode, icon_image):
+    """Process all images in the input folder based on mode (Stickers/Stamps)"""
+    input_folder_name = os.path.basename(input_folder)
+    output_folder_name = f"{input_folder_name}_Output"
+    output_base_dir = os.path.join(input_folder, "..", output_folder_name)
+
+    # Define output directories based on mode
+    output_dirs = {
+        '240': os.path.join(output_base_dir, "output_240x240"),
+        '360': os.path.join(output_base_dir, "output_360x360"),
+        '720': os.path.join(output_base_dir, "output_720x720"),
+        'icon': os.path.join(output_base_dir, "output_icon")
+    }
+
+    if mode == 'stamps':
+        output_dirs['1480'] = os.path.join(output_base_dir, "output_1480x1480")
+
+    # Create output directories
+    for dir_path in output_dirs.values():
+        os.makedirs(dir_path, exist_ok=True)
+        print(f"Created directory: {dir_path}")
+
+    # Process all images
+    for filename in os.listdir(input_folder):
+        if filename.lower().endswith(('.png', '.gif')):
+            input_path = os.path.join(input_folder, filename)
+
+            # Common conversion (240x240 PNG)
+            convert_image(input_path, output_dirs['240'], 240, 'PNG', 290)
+
+            # Mode-specific conversions
+            if mode == 'stickers':
+                convert_image(input_path, output_dirs['360'], 360, 'GIF', 290)
+                convert_image(input_path, output_dirs['720'], 720, 'GIF', 500)
+            else:  # stamps
+                convert_image(input_path, output_dirs['360'], 360, 'PNG', 1024)
+                convert_image(input_path, output_dirs['720'], 720, 'PNG', 1024)
+                convert_image(input_path, output_dirs['1480'], 1480, 'PNG', 1024)
+
+            # Process icon image
+            if input_path == icon_image:
+                convert_image(input_path, output_dirs['icon'], 144, 'PNG', 290, suffix='_color')
+                convert_image(input_path, output_dirs['icon'], 144, 'PNG', 290, 
+                            suffix='_grey', greyscale=True)
+                convert_image(input_path, output_dirs['icon'], 512, 'PNG', 290)
+                if mode == 'stickers':
+                    convert_image(input_path, output_dirs['icon'], 280, 'GIF', 290)
+
+def main():
+    # Get base directory
+    repl_dir = os.path.join(os.getcwd(), "Repl")
+    if not os.path.exists(repl_dir):
+        print("Error: 'Repl' directory not found in current working directory.")
+        return
+
+    # Get mode selection
+    while True:
+        print("\nSelect processing mode:")
+        print("1. Stickers")
+        print("2. Stamps")
+        choice = input("Enter your choice (1 or 2): ").strip()
+        if choice in ('1', '2'):
+            mode = 'stickers' if choice == '1' else 'stamps'
+            break
+        print("Invalid choice. Please enter 1 or 2.")
+
+    # Get available folders (excluding _Output folders)
+    folders = [d for d in os.listdir(repl_dir) 
+              if os.path.isdir(os.path.join(repl_dir, d)) and not d.endswith('_Output')]
+
+    if not folders:
+        print("No valid folders found in Repl directory.")
+        return
+
+    # Display folder options
+    print("\nAvailable folders:")
+    for i, folder in enumerate(folders, 1):
+        print(f"{i}. {folder}")
+
+    # Get folder selection
+    while True:
+        try:
+            choice = int(input("\nEnter the number of the folder to process: "))
+            if 1 <= choice <= len(folders):
+                selected_folder = folders[choice - 1]
+                break
+            print("Invalid choice. Please enter a valid number.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+    input_folder = os.path.join(repl_dir, selected_folder)
+
+    # Get list of images for icon selection
+    images = [f for f in os.listdir(input_folder) 
+             if f.lower().endswith(('.png', '.gif'))]
+
+    if not images:
+        print("No images found in selected folder.")
+        return
+
+    # Display image options
+    print("\nSelect an image to use as the Application Icon:")
+    for i, img in enumerate(images, 1):
+        print(f"{i}. {img}")
+
+    # Get icon selection
+    while True:
+        try:
+            choice = int(input("\nEnter the number of the image to use as icon: "))
+            if 1 <= choice <= len(images):
+                icon_image = os.path.join(input_folder, images[choice - 1])
+                break
+            print("Invalid choice. Please enter a valid number.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+    # Process the images
+    print(f"\nProcessing images in folder: {selected_folder}")
+    process_images(input_folder, mode, icon_image)
+    print("\nConversion complete!")
+
+if __name__ == "__main__":
+    main()

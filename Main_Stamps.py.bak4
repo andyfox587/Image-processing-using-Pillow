@@ -1,0 +1,151 @@
+import os
+import io
+from PIL import Image, ImageSequence
+
+def resize_frame(frame, size, opacity):
+    # Use LANCZOS for better quality when downsizing
+    resampling = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.ANTIALIAS
+    frame = frame.convert('RGBA').resize((size, size), resampling)
+    if opacity < 1.0:
+        alpha = frame.split()[3]
+        alpha = alpha.point(lambda p: int(p * opacity))
+        frame.putalpha(alpha)
+    return frame
+
+def process_animated_gif(img, output_path, size):
+    frames = []
+    durations = []
+
+    for frame in ImageSequence.Iterator(img):
+        duration = frame.info.get('duration', 100)
+        frame = resize_frame(frame, size, 1.0)
+
+        # Convert frame to palette mode and maintain transparency
+        alpha = frame.split()[3] if frame.mode == 'RGBA' else None
+        frame_rgb = frame.convert('RGB')
+        frame_p = frame_rgb.quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+        
+        if alpha:
+            # Create transparency mask - pixels with low alpha become transparent (index 255)
+            # Pixels with high alpha remain opaque (use existing palette index)
+            mask = Image.eval(alpha, lambda a: 255 if a < 128 else 0)
+            frame_p.paste(255, mask=mask)
+            frame_p.info['transparency'] = 255
+
+        frames.append(frame_p)
+        durations.append(duration)
+
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        format='GIF',
+        optimize=True,
+        duration=durations,
+        loop=0,
+        transparency=255,
+        disposal=2  # Restore to background (transparent)
+    )
+
+def convert_image(input_path, output_dir, size, output_format, suffix='', opacity=1.0):
+    try:
+        with Image.open(input_path) as img:
+            is_animated = getattr(img, "is_animated", False)
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+            new_filename = f"{base_name}_{size}x{size}{suffix}.{output_format.lower()}"
+            output_path = os.path.join(output_dir, new_filename)
+
+            if output_format.lower() == 'gif' and is_animated:
+                process_animated_gif(img, output_path, size)
+            elif output_format.lower() == 'gif':
+                # Static image to GIF with transparency
+                img = resize_frame(img, size, opacity)
+                alpha = img.split()[3] if img.mode == 'RGBA' else None
+                img_rgb = img.convert('RGB')
+                img_p = img_rgb.quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+                
+                if alpha:
+                    # Create transparency mask - pixels with low alpha become transparent (index 255)
+                    # Pixels with high alpha remain opaque (use existing palette index)
+                    mask = Image.eval(alpha, lambda a: 255 if a < 128 else 0)
+                    img_p.paste(255, mask=mask)
+                    img_p.info['transparency'] = 255
+                
+                img_p.save(output_path, format='GIF', optimize=True, transparency=255)
+            else:
+                # PNG or other formats
+                img = resize_frame(img, size, opacity)
+                img.save(output_path, format=output_format.upper(), optimize=True)
+
+            print(f"Created: {output_path}")
+    except Exception as e:
+        print(f"Error processing {input_path}: {str(e)}")
+
+def process_images(input_folder):
+    input_folder_name = os.path.basename(input_folder)
+    output_folder_name = f"{input_folder_name}_Output"
+    output_base_dir = os.path.join("/home/runner/Image-Processing-using-Pillow/Repl", output_folder_name)
+
+    output_dirs = {
+        240: os.path.join(output_base_dir, "output_240x240_PNG"),
+        360: os.path.join(output_base_dir, "output_360x360_GIF"),
+        720: os.path.join(output_base_dir, "output_720x720_GIF"),
+        1480: os.path.join(output_base_dir, "output_1480x1480_GIF"),
+        'misc': os.path.join(output_base_dir, "output_misc")
+    }
+
+    for dir_name in output_dirs.values():
+        os.makedirs(dir_name, exist_ok=True)
+        print(f"Created output directory: {dir_name}")
+
+    for filename in os.listdir(input_folder):
+        if filename.lower().endswith(('.png', '.gif')):
+            input_path = os.path.join(input_folder, filename)
+
+            # Standard conversions for all files
+            convert_image(input_path, output_dirs[240], 240, 'PNG')
+            convert_image(input_path, output_dirs[360], 360, 'GIF')
+            convert_image(input_path, output_dirs[720], 720, 'GIF')
+            convert_image(input_path, output_dirs[1480], 1480, 'GIF')
+
+            # Special handling for files starting with "2THUMBZ_17_MISC_"
+            if filename.startswith("2THUMBZ_10_LOGO_"):
+                convert_image(input_path, output_dirs['misc'], 280, 'GIF')
+                convert_image(input_path, output_dirs['misc'], 512, 'PNG')
+                convert_image(input_path, output_dirs['misc'], 144, 'PNG', suffix='_On')
+                convert_image(input_path, output_dirs['misc'], 144, 'PNG', suffix='_Off', opacity=0.7)
+
+def main():
+    repl_dir = "/home/runner/Image-Processing-using-Pillow/Repl"
+    # List subfolders in the Repl directory
+    subfolders = [d for d in os.listdir(repl_dir) if os.path.isdir(os.path.join(repl_dir, d))]
+
+    if not subfolders:
+        print("No subfolders found in the Repl directory.")
+        return
+
+    print("Stamps - Available folders in Repl directory:")
+    for i, folder in enumerate(subfolders, 1):
+        print(f"{i}. {folder}")
+
+    while True:
+        choice = input("Enter the number of the folder you want to process (or 'q' to quit): ")
+        if choice.lower() == 'q':
+            break
+
+        try:
+            folder_index = int(choice) - 1
+            if 0 <= folder_index < len(subfolders):
+                selected_folder = subfolders[folder_index]
+                folder_path = os.path.join(repl_dir, selected_folder)
+                print(f"Processing images in folder: {folder_path}")
+                process_images(folder_path)
+                print("Conversion complete!")
+                print(f"You can find the converted images in the '{selected_folder}_Output' folder within the '/home/runner/Image-Processing-using-Pillow/Repl/' directory.")
+            else:
+                print("Invalid folder number. Please try again.")
+        except ValueError:
+            print("Please enter a valid number or 'q' to quit.")
+
+if __name__ == "__main__":
+    main()
