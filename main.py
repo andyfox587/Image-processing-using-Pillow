@@ -4,30 +4,66 @@ import numpy as np
 from PIL import Image, ImageSequence, ImageOps
 
 def remove_white_background(img, threshold=240):
-    """Remove white/near-white background from an image, making it transparent.
+    """Remove white/near-white background using edge flood-fill.
 
-    Converts white and near-white pixels (where R, G, and B are all >= threshold)
-    to fully transparent. Preserves all other pixels unchanged.
+    Only removes white pixels that are connected to the edges of the image
+    (like a paint bucket from the corners). White pixels inside the artwork
+    are preserved because they are not connected to the border.
 
     Args:
         img: PIL Image (will be converted to RGBA if needed)
-        threshold: Pixels with R, G, B all >= this value become transparent (default 240)
+        threshold: Pixels with R, G, B all >= this value are considered white (default 240)
 
     Returns:
-        RGBA PIL Image with white background removed
+        RGBA PIL Image with white background removed, artwork white preserved
     """
+    from collections import deque
+
     if img.mode != 'RGBA':
         img = img.convert('RGBA')
 
-    # Convert to numpy array for fast pixel manipulation
     data = np.array(img)
+    height, width = data.shape[:2]
 
-    # Find pixels where R, G, and B are all >= threshold (white/near-white)
-    r, g, b, a = data[:, :, 0], data[:, :, 1], data[:, :, 2], data[:, :, 3]
-    white_mask = (r >= threshold) & (g >= threshold) & (b >= threshold)
+    # Build a mask of white/near-white pixels
+    r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
+    is_white = (r >= threshold) & (g >= threshold) & (b >= threshold)
 
-    # Set alpha to 0 (transparent) for white pixels
-    data[:, :, 3] = np.where(white_mask, 0, a)
+    # Flood-fill from all edge pixels that are white
+    # Only white pixels connected to the border will be marked for removal
+    background_mask = np.zeros((height, width), dtype=bool)
+    visited = np.zeros((height, width), dtype=bool)
+
+    # Seed the queue with all white edge pixels
+    queue = deque()
+    for x in range(width):
+        if is_white[0, x] and not visited[0, x]:
+            queue.append((0, x))
+            visited[0, x] = True
+        if is_white[height - 1, x] and not visited[height - 1, x]:
+            queue.append((height - 1, x))
+            visited[height - 1, x] = True
+    for y in range(height):
+        if is_white[y, 0] and not visited[y, 0]:
+            queue.append((y, 0))
+            visited[y, 0] = True
+        if is_white[y, width - 1] and not visited[y, width - 1]:
+            queue.append((y, width - 1))
+            visited[y, width - 1] = True
+
+    # BFS flood-fill: spread from edge white pixels to connected white pixels
+    while queue:
+        cy, cx = queue.popleft()
+        background_mask[cy, cx] = True
+
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            ny, nx = cy + dy, cx + dx
+            if 0 <= ny < height and 0 <= nx < width and not visited[ny, nx] and is_white[ny, nx]:
+                visited[ny, nx] = True
+                queue.append((ny, nx))
+
+    # Set alpha to 0 only for background white pixels (connected to edges)
+    data[:, :, 3] = np.where(background_mask, 0, data[:, :, 3])
 
     return Image.fromarray(data, 'RGBA')
 
