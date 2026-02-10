@@ -478,10 +478,80 @@ def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
         os.remove(temp_path)
     print(f"⚠ Unable to create acceptable version under {target_size_kb + tolerance}KB")
 
+def extract_gif_frame_as_rgba(input_path):
+    """Extract frame 0 from a GIF file and return as RGBA image.
+
+    Handles animated GIFs, palette-mode GIFs, and GIFs with transparency.
+    Returns an RGBA PIL Image or None on failure.
+    """
+    try:
+        img = Image.open(input_path)
+
+        # Seek to first frame explicitly
+        img.seek(0)
+
+        # Copy the frame so we can close the file
+        frame = img.copy()
+
+        # Convert palette mode to RGBA (handles transparency info in palette)
+        if frame.mode == 'P':
+            # Check if GIF has transparency
+            if 'transparency' in frame.info:
+                frame = frame.convert('RGBA')
+            else:
+                frame = frame.convert('RGBA')
+        elif frame.mode != 'RGBA':
+            frame = frame.convert('RGBA')
+
+        img.close()
+        return frame
+    except Exception as e:
+        print(f"  ERROR extracting GIF frame: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 def convert_image(input_path, output_dir, size, output_format, max_size_kb,
                  suffix='', opacity=1.0, greyscale=False, stamps_mode=False):
     """Convert a single image with size and format constraints"""
     try:
+        # For stamps mode with GIF input, use special GIF extraction
+        is_gif_input = input_path.lower().endswith('.gif')
+
+        if stamps_mode and is_gif_input:
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+
+            # Clean up the base name (remove _800x800 suffix if present)
+            if base_name.lower().endswith('_800x800'):
+                base_name = base_name[:-len('_800x800')]
+
+            new_filename = f"{base_name}_{size}x{size}{suffix}.png"
+            output_path = os.path.join(output_dir, new_filename)
+
+            print(f"Converting GIF to PNG (frame 0): {os.path.basename(input_path)} -> {size}x{size} PNG")
+
+            # Extract frame 0 as RGBA
+            img = extract_gif_frame_as_rgba(input_path)
+            if img is None:
+                print(f"  FAILED to extract frame from GIF: {os.path.basename(input_path)}")
+                return
+
+            print(f"  Extracted frame: mode={img.mode}, size={img.size}")
+
+            img = resize_frame(img, size, opacity, greyscale)
+
+            # Use stamps-specific PNG optimization
+            image_data = optimize_png_stamps(img, max_size_kb)
+            if image_data:
+                with open(output_path, 'wb') as f:
+                    f.write(image_data)
+                file_size = len(image_data) / 1024
+                print(f"  Stamps PNG created: {new_filename} ({file_size:.1f}KB)")
+            else:
+                img.save(output_path, format='PNG')
+                print(f"  Stamps PNG created: {new_filename}")
+            return
+
         with Image.open(input_path) as img:
             is_animated = getattr(img, "is_animated", False)
             base_name = os.path.splitext(os.path.basename(input_path))[0]
@@ -494,14 +564,9 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
             new_filename = f"{base_name}_{size}x{size}{suffix}.{output_format.lower()}"
             output_path = os.path.join(output_dir, new_filename)
 
-            # For stamps mode, force PNG format; convert GIF to PNG using frame 0
+            # For stamps mode with PNG input
             if stamps_mode:
-                # If input is an animated GIF, extract frame 0
-                if is_animated or input_path.lower().endswith('.gif'):
-                    print(f"Converting GIF to PNG (frame 0): {os.path.basename(input_path)} -> {size}x{size} PNG")
-                    img = img.copy()  # Get frame 0 (first frame)
-                else:
-                    print(f"Processing image for stamps: {os.path.basename(input_path)} -> {size}x{size} PNG")
+                print(f"Processing image for stamps: {os.path.basename(input_path)} -> {size}x{size} PNG")
 
                 # Ensure RGBA mode for transparency
                 if img.mode != 'RGBA':
@@ -601,7 +666,9 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
             if not stamps_mode:
                 print(f"Created: {output_path}")
     except Exception as e:
-        print(f"Error processing {input_path}: {str(e)}")
+        print(f"ERROR processing {input_path}: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 def process_images(input_folder, mode, icon_image):
     """Process all images in the input folder based on mode (Stickers/Stamps)"""
@@ -631,6 +698,7 @@ def process_images(input_folder, mode, icon_image):
 
     # Process all images
     first_png_path = None  # Track first PNG for icon generation in stamps mode
+    first_image_path = None  # Fallback: track first image of any type
     for filename in image_files:
         input_path = os.path.join(input_folder, filename)
 
@@ -642,13 +710,15 @@ def process_images(input_folder, mode, icon_image):
             convert_image(input_path, output_dirs['720'], 720, 'GIF', 500)
         else:  # stamps
             # Process ALL .png and .gif files in stamps mode
-            print(f"Processing stamps from: {filename}")
+            print(f"\nProcessing stamps from: {filename}")
             convert_image(input_path, output_dirs['240'], 240, 'PNG', 290, stamps_mode=True)
             convert_image(input_path, output_dirs['360'], 360, 'PNG', 250, stamps_mode=True)
             convert_image(input_path, output_dirs['720'], 720, 'PNG', 500, stamps_mode=True)
             convert_image(input_path, output_dirs['1480'], 1480, 'PNG', 500, stamps_mode=True)
 
-            # Track the first PNG file for icon generation
+            # Track the first image for icon generation (prefer PNG, fallback to any)
+            if first_image_path is None:
+                first_image_path = input_path
             if first_png_path is None and filename.lower().endswith('.png'):
                 first_png_path = input_path
 
@@ -684,16 +754,18 @@ def process_images(input_folder, mode, icon_image):
                 print(f"No animated GIF found, creating static 280x280 from PNG")
                 convert_image(input_path, output_dirs['icon'], 280, 'GIF', 290)
 
-    # Generate icon images for stamps mode using the first PNG file
-    if mode == 'stamps' and first_png_path:
-        print(f"\nGenerating icon images from: {os.path.basename(first_png_path)}")
-        convert_image(first_png_path, output_dirs['icon'], 512, 'PNG', 500, stamps_mode=True)
-        convert_image(first_png_path, output_dirs['icon'], 144, 'PNG', 290,
-                     suffix='_COLOR', stamps_mode=True)
-        convert_image(first_png_path, output_dirs['icon'], 144, 'PNG', 290,
-                     suffix='_GREY', greyscale=True, stamps_mode=True)
-    elif mode == 'stamps' and not first_png_path:
-        print("\nWarning: No PNG files found for icon generation. Skipping output_icon.")
+    # Generate icon images for stamps mode using the first PNG file (or first image as fallback)
+    if mode == 'stamps':
+        icon_source = first_png_path or first_image_path
+        if icon_source:
+            print(f"\n--- Generating icon images from: {os.path.basename(icon_source)} ---")
+            convert_image(icon_source, output_dirs['icon'], 512, 'PNG', 500, stamps_mode=True)
+            convert_image(icon_source, output_dirs['icon'], 144, 'PNG', 290,
+                         suffix='_COLOR', stamps_mode=True)
+            convert_image(icon_source, output_dirs['icon'], 144, 'PNG', 290,
+                         suffix='_GREY', greyscale=True, stamps_mode=True)
+        else:
+            print("\nWarning: No image files found for icon generation. Skipping output_icon.")
 
 def main():
     # Get base directory - look for Repl directory in current or parent directories
