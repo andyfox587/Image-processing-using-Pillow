@@ -1,6 +1,35 @@
 import os
 import io
+import numpy as np
 from PIL import Image, ImageSequence, ImageOps
+
+def remove_white_background(img, threshold=240):
+    """Remove white/near-white background from an image, making it transparent.
+
+    Converts white and near-white pixels (where R, G, and B are all >= threshold)
+    to fully transparent. Preserves all other pixels unchanged.
+
+    Args:
+        img: PIL Image (will be converted to RGBA if needed)
+        threshold: Pixels with R, G, B all >= this value become transparent (default 240)
+
+    Returns:
+        RGBA PIL Image with white background removed
+    """
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
+
+    # Convert to numpy array for fast pixel manipulation
+    data = np.array(img)
+
+    # Find pixels where R, G, and B are all >= threshold (white/near-white)
+    r, g, b, a = data[:, :, 0], data[:, :, 1], data[:, :, 2], data[:, :, 3]
+    white_mask = (r >= threshold) & (g >= threshold) & (b >= threshold)
+
+    # Set alpha to 0 (transparent) for white pixels
+    data[:, :, 3] = np.where(white_mask, 0, a)
+
+    return Image.fromarray(data, 'RGBA')
 
 def resize_frame(frame, size, opacity=1.0, greyscale=False):
     """Resize frame to fit within size x size, centered on a transparent canvas."""
@@ -546,6 +575,9 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
 
             print(f"  Extracted frame: mode={img.mode}, size={img.size}")
 
+            # Remove white background to make it transparent
+            img = remove_white_background(img)
+
             img = resize_frame(img, size, opacity, greyscale)
 
             # Use stamps-specific PNG optimization
@@ -579,6 +611,9 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
                 # Ensure RGBA mode for transparency
                 if img.mode != 'RGBA':
                     img = img.convert('RGBA')
+
+                # Remove white background to make it transparent
+                img = remove_white_background(img)
 
                 img = resize_frame(img, size, opacity, greyscale)
 
