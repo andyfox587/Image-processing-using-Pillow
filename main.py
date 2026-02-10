@@ -3,16 +3,20 @@ import io
 from PIL import Image, ImageSequence, ImageOps
 
 def resize_frame(frame, size, opacity=1.0, greyscale=False):
-    """Resize frame while preserving colors (no palette mode preservation)"""
+    """Resize frame to fit within size x size, centered on a transparent canvas."""
     # Use LANCZOS for better quality when downsizing
     try:
         resampling = Image.LANCZOS
     except AttributeError:
         resampling = Image.ANTIALIAS
-    
+
     # Store original info
     original_info = frame.info.copy() if hasattr(frame, 'info') else {}
-    
+
+    # Ensure frame is RGBA for transparency support
+    if frame.mode != 'RGBA':
+        frame = frame.convert('RGBA')
+
     # Calculate new size maintaining aspect ratio
     original_width, original_height = frame.size
     if original_width > original_height:
@@ -21,23 +25,27 @@ def resize_frame(frame, size, opacity=1.0, greyscale=False):
     else:
         new_height = size
         new_width = int((original_width * size) / original_height)
-    
+
     # Ensure minimum size of 1
     new_width = max(1, new_width)
     new_height = max(1, new_height)
-    
+
     # Resize the frame
     resized_frame = frame.resize((new_width, new_height), resampling)
 
+    # Create a transparent square canvas and center the resized image on it
+    canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    paste_x = (size - new_width) // 2
+    paste_y = (size - new_height) // 2
+    canvas.paste(resized_frame, (paste_x, paste_y), resized_frame)
+    resized_frame = canvas
+
     # Apply greyscale conversion if requested (preserves transparency)
     if greyscale:
-        if resized_frame.mode == 'RGBA':
-            # Split into channels, convert RGB to greyscale, recombine with alpha
-            r, g, b, a = resized_frame.split()
-            grey = ImageOps.grayscale(resized_frame.convert('RGB'))
-            resized_frame = Image.merge('RGBA', (grey, grey, grey, a))
-        else:
-            resized_frame = ImageOps.grayscale(resized_frame).convert('RGBA')
+        # Split into channels, convert RGB to greyscale, recombine with alpha
+        r, g, b, a = resized_frame.split()
+        grey = ImageOps.grayscale(resized_frame.convert('RGB'))
+        resized_frame = Image.merge('RGBA', (grey, grey, grey, a))
 
     # Restore original info
     if hasattr(resized_frame, 'info'):
