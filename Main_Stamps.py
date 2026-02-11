@@ -168,23 +168,73 @@ def main():
         print(f"{i}. {folder}")
 
     while True:
-        choice = input("Enter the number of the folder you want to process (or 'q' to quit): ")
-        if choice.lower() == 'q':
+        choice_input = input("\nEnter folder number(s) to process (e.g., '1', '1,3,5', or '58-61'), or 'q' to quit: ").strip()
+        if choice_input.lower() == 'q':
             break
 
         try:
-            folder_index = int(choice) - 1
-            if 0 <= folder_index < len(subfolders):
-                selected_folder = subfolders[folder_index]
+            # Parse input supporting both comma-separated values and ranges
+            choices = []
+            for part in choice_input.split(','):
+                part = part.strip()
+                if '-' in part:
+                    range_parts = part.split('-')
+                    if len(range_parts) == 2:
+                        start = int(range_parts[0].strip())
+                        end = int(range_parts[1].strip())
+                        if start <= end:
+                            choices.extend(range(start, end + 1))
+                        else:
+                            choices.extend(range(start, end - 1, -1))
+                    else:
+                        raise ValueError("Invalid range format")
+                else:
+                    choices.append(int(part))
+
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_choices = []
+            for c in choices:
+                if c not in seen:
+                    seen.add(c)
+                    unique_choices.append(c)
+            choices = unique_choices
+
+            # Validate all choices
+            invalid = [c for c in choices if not (1 <= c <= len(subfolders))]
+            if invalid:
+                print(f"Invalid folder number(s): {invalid}. Please enter numbers between 1 and {len(subfolders)}.")
+                continue
+
+            selected_folders = [subfolders[c - 1] for c in choices]
+            total = len(selected_folders)
+            print(f"\nSelected {total} folder(s) for processing: {', '.join(selected_folders)}")
+
+            completed = 0
+            skipped = 0
+            for i, selected_folder in enumerate(selected_folders, 1):
                 folder_path = os.path.join(repl_dir, selected_folder)
-                print(f"Processing images in folder: {folder_path}")
+
+                print(f"\n{'='*60}")
+                print(f"  [{i} of {total}] Starting: {selected_folder}")
+                print(f"{'='*60}")
+
                 process_images(folder_path)
-                print("Conversion complete!")
-                print(f"You can find the converted images in the '{selected_folder}_Output' folder within the '/home/runner/Image-Processing-using-Pillow/Repl/' directory.")
-            else:
-                print("Invalid folder number. Please try again.")
+
+                completed += 1
+                print(f"\n  DONE: {selected_folder} ({i} of {total} complete)")
+                if i < total:
+                    print(f"  Proceeding to next folder...")
+
+            print(f"\n{'='*60}")
+            print(f"  Batch processing complete!")
+            print(f"  Processed: {completed} folder(s)")
+            if skipped > 0:
+                print(f"  Skipped: {skipped} folder(s)")
+            print(f"{'='*60}")
+
         except ValueError:
-            print("Please enter a valid number or 'q' to quit.")
+            print("Please enter valid numbers separated by commas, or ranges like '58-61'.")
 
 if __name__ == "__main__":
     main()

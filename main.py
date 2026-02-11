@@ -896,28 +896,64 @@ def main():
     for i, folder in enumerate(folders, 1):
         print(f"{i}. {folder}")
 
-    # Get folder selection (support multiple folders)
+    # Get folder selection (support multiple folders and ranges)
     selected_folders = []
     while True:
         try:
-            choice_input = input("\nEnter folder number(s) to process (e.g., '1' or '1,3,5'): ").strip()
-            choices = [int(x.strip()) for x in choice_input.split(',')]
-            
+            choice_input = input("\nEnter folder number(s) to process (e.g., '1', '1,3,5', or '58-61'): ").strip()
+
+            # Parse input supporting both comma-separated values and ranges
+            choices = []
+            for part in choice_input.split(','):
+                part = part.strip()
+                if '-' in part:
+                    # Handle range like "58-61"
+                    range_parts = part.split('-')
+                    if len(range_parts) == 2:
+                        start = int(range_parts[0].strip())
+                        end = int(range_parts[1].strip())
+                        if start <= end:
+                            choices.extend(range(start, end + 1))
+                        else:
+                            choices.extend(range(start, end - 1, -1))
+                    else:
+                        raise ValueError("Invalid range format")
+                else:
+                    choices.append(int(part))
+
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_choices = []
+            for c in choices:
+                if c not in seen:
+                    seen.add(c)
+                    unique_choices.append(c)
+            choices = unique_choices
+
             # Validate all choices
             valid_choices = all(1 <= choice <= len(folders) for choice in choices)
             if valid_choices:
                 selected_folders = [folders[choice - 1] for choice in choices]
                 break
             else:
-                print("Invalid choice(s). Please enter valid numbers.")
+                print(f"Invalid choice(s). Please enter numbers between 1 and {len(folders)}.")
         except ValueError:
-            print("Please enter valid numbers separated by commas.")
+            print("Please enter valid numbers separated by commas, or ranges like '58-61'.")
 
-    print(f"\nSelected {len(selected_folders)} folder(s) for processing: {', '.join(selected_folders)}")
+    total_folders = len(selected_folders)
+    print(f"\nSelected {total_folders} folder(s) for processing: {', '.join(selected_folders)}")
+    if total_folders > 1:
+        print(f"Batch processing will run sequentially through all {total_folders} folders.\n")
 
     # Process each selected folder
-    for folder_name in selected_folders:
+    completed_count = 0
+    skipped_count = 0
+    for folder_index, folder_name in enumerate(selected_folders, 1):
         input_folder = os.path.join(repl_dir, folder_name)
+
+        print(f"\n{'='*60}")
+        print(f"  [{folder_index} of {total_folders}] Starting: {folder_name}")
+        print(f"{'='*60}")
 
         # Check if folder has images
         images = [f for f in os.listdir(input_folder)
@@ -925,6 +961,7 @@ def main():
 
         if not images:
             print(f"No images found in {folder_name}, skipping.")
+            skipped_count += 1
             continue
 
         # For stickers mode, find the *_800x800.png file as icon source
@@ -936,18 +973,26 @@ def main():
                     break
 
             if not icon_image:
-                print(f"\nWarning: No *_800x800.png file found in {folder_name}, skipping this folder.")
+                print(f"Warning: No *_800x800.png file found in {folder_name}, skipping this folder.")
+                skipped_count += 1
                 continue
-            print(f"\nProcessing images in folder: {folder_name}")
             print(f"Using icon: {os.path.basename(icon_image)}")
         else:
-            print(f"\nProcessing stamps in folder: {folder_name}")
             print(f"Found {len(images)} image(s) to process")
 
         process_images(input_folder, mode, icon_image)
-        print(f"Completed processing: {folder_name}")
 
-    print(f"\n🎉 Batch conversion complete! Processed {len(selected_folders)} folder(s).")
+        completed_count += 1
+        print(f"\n  DONE: {folder_name} ({folder_index} of {total_folders} complete)")
+        if folder_index < total_folders:
+            print(f"  Proceeding to next folder...")
+
+    print(f"\n{'='*60}")
+    print(f"  Batch processing complete!")
+    print(f"  Processed: {completed_count} folder(s)")
+    if skipped_count > 0:
+        print(f"  Skipped: {skipped_count} folder(s)")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()
