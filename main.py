@@ -225,6 +225,49 @@ def process_animated_gif(img, output_path, size, max_size_kb):
 
     save_gif_optimized(frames, frame_info, output_path, max_size_kb)
 
+def _rgba_to_palette_with_transparency(rgba_img, num_colors=255):
+    """Convert an RGBA image to palette mode (P) with transparency preserved.
+
+    Reserves palette index 0 for fully transparent pixels. All pixels with
+    alpha < 128 are mapped to that index.
+    """
+    if rgba_img.mode != 'RGBA':
+        rgba_img = rgba_img.convert('RGBA')
+
+    alpha = rgba_img.split()[3]
+
+    # Quantize the RGB channels to (num_colors) colors, reserving index 0 for transparency
+    rgb_img = rgba_img.convert('RGB')
+    # Use quantize with a limited palette
+    quantized = rgb_img.quantize(colors=num_colors, method=2)
+
+    # Get the palette and shift all indices by 1 to reserve index 0
+    palette_data = quantized.getpalette()
+
+    # Create new palette with index 0 = transparent color (magenta as sentinel)
+    new_palette = [0, 0, 0] + palette_data[:num_colors * 3]
+    # Pad to 256 colors
+    while len(new_palette) < 768:
+        new_palette.append(0)
+
+    # Create new image with shifted indices
+    px_data = list(quantized.getdata())
+    shifted_data = []
+    alpha_data = list(alpha.getdata())
+    for i, px in enumerate(px_data):
+        if alpha_data[i] < 128:
+            shifted_data.append(0)  # transparent index
+        else:
+            shifted_data.append(px + 1)  # shift by 1
+
+    new_img = Image.new('P', rgba_img.size)
+    new_img.putdata(shifted_data)
+    new_img.putpalette(new_palette)
+    new_img.info['transparency'] = 0
+
+    return new_img
+
+
 def save_gif_optimized(frames, frame_info, output_path, max_size_kb):
     """Save GIF preserving all original frame metadata and colors"""
     # Extract durations and disposal methods from original frames
@@ -236,84 +279,91 @@ def save_gif_optimized(frames, frame_info, output_path, max_size_kb):
     
     # EZGIF APPROACH: Progressive lossy compression (no palette manipulation)
     print(f"Using EZGIF-style progressive lossy compression")
-    
-    # Convert all RGBA frames to RGB (GIF doesn't support alpha)
-    rgb_frames = []
+
+    # Convert all RGBA frames to palette mode with transparency preserved
+    palette_frames = []
     for frame in frames:
-        if frame.mode == 'RGBA':
-            # Create white background and paste frame with alpha
-            rgb_frame = Image.new('RGB', frame.size, (255, 255, 255))
-            rgb_frame.paste(frame, mask=frame.split()[3] if len(frame.split()) == 4 else None)
-            rgb_frames.append(rgb_frame)
-        elif frame.mode == 'RGB':
-            rgb_frames.append(frame)
-        else:
-            # Convert any other mode to RGB
-            rgb_frames.append(frame.convert('RGB'))
-    
-    print(f"Converted {len(rgb_frames)} frames to RGB mode")
-    
+        if frame.mode != 'RGBA':
+            frame = frame.convert('RGBA')
+        palette_frames.append(_rgba_to_palette_with_transparency(frame))
+
+    print(f"Converted {len(palette_frames)} frames to palette mode with transparency")
+
     # EZGIF Method: Try progressive lossy compression levels
     import tempfile
     import os
-    
+
     # Progressive compression levels to try (like EZGIF: 35%, 45%, 55%, etc.)
     compression_levels = [35, 45, 55, 65, 75, 85, 95]
-    
+
     for compression_level in compression_levels:
         print(f"Trying lossy compression at {compression_level}%...")
-        
+
         try:
             # Create temporary file to test compression
             with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as temp_file:
                 temp_path = temp_file.name
-            
-            # Save with basic settings (like EZGIF does)
-            rgb_frames[0].save(
+
+            num_colors = max(32, int(256 * (100 - compression_level) / 100))
+            # Re-quantize with fewer colors at higher compression
+            compressed_frames = []
+            for frame in frames:
+                if frame.mode != 'RGBA':
+                    frame = frame.convert('RGBA')
+                p_frame = _rgba_to_palette_with_transparency(frame, num_colors=min(255, num_colors))
+                compressed_frames.append(p_frame)
+
+            # Save with transparency
+            compressed_frames[0].save(
                 temp_path,
                 save_all=True,
-                append_images=rgb_frames[1:],
+                append_images=compressed_frames[1:],
                 duration=durations,
                 disposal=disposals,
                 loop=0,
-                # Apply lossy compression by reducing color count based on compression level
-                # Higher compression = fewer colors (but not palette manipulation)
-                colors=max(32, int(256 * (100 - compression_level) / 100))  # Scale colors based on compression
+                transparency=0,
             )
-            
+
             # Check file size
             file_size_kb = os.path.getsize(temp_path) / 1024
             print(f"  Result: {file_size_kb:.1f}KB with {compression_level}% compression")
-            
+
             if file_size_kb <= max_size_kb:
-                print(f"✓ SUCCESS! Achieved {file_size_kb:.1f}KB with {compression_level}% lossy compression")
+                print(f"SUCCESS! Achieved {file_size_kb:.1f}KB with {compression_level}% lossy compression")
                 # Move temp file to final location
                 os.rename(temp_path, output_path)
                 return
             else:
                 print(f"  Still too large ({file_size_kb:.1f}KB > {max_size_kb}KB)")
                 os.unlink(temp_path)  # Clean up temp file
-                
+
         except Exception as e:
             print(f"  Error with {compression_level}% compression: {e}")
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
             continue
-    
+
     # If all compression levels failed, fall back to frame reduction (EZGIF's last resort)
     print(f"All compression levels failed, falling back to frame reduction...")
-    
-    # Basic save as last resort
+
+    # Basic save as last resort with transparency
     try:
-        rgb_frames[0].save(
+        fallback_frames = []
+        for frame in frames:
+            if frame.mode != 'RGBA':
+                frame = frame.convert('RGBA')
+            fallback_frames.append(_rgba_to_palette_with_transparency(frame))
+
+        fallback_frames[0].save(
             output_path,
             save_all=True,
-            append_images=rgb_frames[1:],
+            append_images=fallback_frames[1:],
             duration=durations,
             disposal=disposals,
-            loop=0
+            loop=0,
+            transparency=0,
         )
-        print(f"Fallback save completed")
+        print(f"Fallback save completed with transparency")
     except Exception as e:
         print(f"All save methods failed: {e}")
 
@@ -468,26 +518,29 @@ def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
         for info in test_info:
             info['duration'] = new_duration
         
-        # Use frames as-is with NO color compression to preserve quality
-        final_frames = test_frames
-        
+        # Convert RGBA frames to palette mode with transparency
+        final_frames = []
+        for frame in test_frames:
+            if frame.mode != 'RGBA':
+                frame = frame.convert('RGBA')
+            final_frames.append(_rgba_to_palette_with_transparency(frame))
+
         # Debug frame information
         print(f"  Final frames modes: {[f.mode for f in final_frames[:3]]}")
-        
-        # All frames should now be in RGBA mode
-        print(f"  All frames in RGBA mode - preserving full color information")
-        
+        print(f"  All frames converted to palette mode with transparency")
+
         # Save and test file size
         durations = [info.get('duration', 100) for info in test_info]
         disposals = [info.get('disposal', 0) for info in test_info]
-        
+
         final_frames[0].save(
             temp_path,
             save_all=True,
             append_images=final_frames[1:],
             duration=durations,
             disposal=disposals,
-            loop=0
+            loop=0,
+            transparency=0,
         )
         
         test_size_kb = os.path.getsize(temp_path) / 1024
@@ -521,19 +574,25 @@ def create_compressed_gif(frames, frame_info, output_path, target_size_kb=500):
         new_duration = 100  # Standard duration
         for info in test_info:
             info['duration'] = new_duration
-            
-        # All frames should now be in RGBA mode, so no palette handling needed
-        
+
+        # Convert to palette with transparency
+        palette_test_frames = []
+        for frame in test_frames:
+            if frame.mode != 'RGBA':
+                frame = frame.convert('RGBA')
+            palette_test_frames.append(_rgba_to_palette_with_transparency(frame))
+
         durations = [info.get('duration', 100) for info in test_info]
         disposals = [info.get('disposal', 0) for info in test_info]
-        
-        test_frames[0].save(
+
+        palette_test_frames[0].save(
             temp_path,
             save_all=True,
-            append_images=test_frames[1:],
+            append_images=palette_test_frames[1:],
             duration=durations,
             disposal=disposals,
-            loop=0
+            loop=0,
+            transparency=0,
         )
         
         test_size_kb = os.path.getsize(temp_path) / 1024
@@ -716,10 +775,11 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
 
                 # Handle different output formats properly
                 if output_format.upper() == 'GIF':
-                    # Convert to RGBA to prevent palette issues
+                    # Convert to palette mode with transparency preserved
                     if img.mode != 'RGBA':
                         img = img.convert('RGBA')
-                    img.save(output_path, format='GIF')
+                    p_img = _rgba_to_palette_with_transparency(img)
+                    p_img.save(output_path, format='GIF', transparency=0)
                     
                 elif output_format.upper() in ['JPEG', 'JPG']:
                     # Convert RGBA to RGB for JPEG
