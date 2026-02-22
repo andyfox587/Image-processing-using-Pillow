@@ -201,18 +201,21 @@ def process_animated_gif(img, output_path, size, max_size_kb):
         # This is the ONLY way to prevent PIL from doing palette conversions
         if frame_copy.mode != 'RGBA':
             frame_copy = frame_copy.convert('RGBA')
-        
+
+        # Remove white background from each frame for transparency
+        frame_copy = remove_white_background(frame_copy)
+
         # Get frame-specific info
         info = frame_copy.info.copy() if hasattr(frame_copy, 'info') else {}
-        
+
         # Read disposal method from frame attribute
         disposal_method = getattr(frame, 'disposal_method', 0)
         info['disposal'] = disposal_method
-        
+
         # Debug frame info for first few frames
         if frame_index < 3:
             print(f"Frame {frame_index}: mode={frame_copy.mode}, size={frame_copy.size}")
-        
+
         resized_frame = resize_frame(frame_copy, size)
         
         # Restore all metadata to resized frame
@@ -740,14 +743,16 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
                     frames = []
                     frame_info = []
                     for frame in ImageSequence.Iterator(img):
-                        # Make a copy of the frame 
+                        # Make a copy of the frame
                         frame_copy = frame.copy()
-                        
+
                         # FORCE convert ALL frames to RGBA mode to ensure consistency
-                        # This is the ONLY way to prevent PIL from doing palette conversions
                         if frame_copy.mode != 'RGBA':
                             frame_copy = frame_copy.convert('RGBA')
-                        
+
+                        # Remove white background for transparency
+                        frame_copy = remove_white_background(frame_copy)
+
                         info = frame_copy.info.copy() if hasattr(frame_copy, 'info') else {}
                         disposal_method = getattr(frame, 'disposal_method', 0)
                         info['disposal'] = disposal_method
@@ -771,6 +776,10 @@ def convert_image(input_path, output_dir, size, output_format, max_size_kb,
                         traceback.print_exc()
             else:
                 print(f"Processing static image: {os.path.basename(input_path)} -> {size}x{size} (animated: {is_animated})")
+                # Remove white background for transparency (stickers and all modes)
+                if img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                img = remove_white_background(img)
                 img = resize_frame(img, size, opacity, greyscale)
 
                 # Handle different output formats properly
